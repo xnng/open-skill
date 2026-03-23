@@ -1,6 +1,6 @@
 # Open Skill
 
-开源 AI Agent Skills 集合，兼容 [Vercel Skills CLI](https://www.npmjs.com/package/skills)。
+个人开源的 AI Agent Skills，兼容 [Vercel Skills CLI](https://www.npmjs.com/package/skills)。
 
 ## 安装
 
