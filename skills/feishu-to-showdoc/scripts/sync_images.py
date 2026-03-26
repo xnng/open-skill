@@ -129,6 +129,46 @@ def upload_to_showdoc(file_path, creds):
     return None
 
 
+def convert_lark_table(match):
+    """将 <lark-table> 转换为 Markdown 表格"""
+    table_html = match.group(0)
+    rows = re.findall(r'<lark-tr>(.*?)</lark-tr>', table_html, re.DOTALL)
+    if not rows:
+        return ""
+
+    md_rows = []
+    for row in rows:
+        cells = re.findall(r'<lark-td>(.*?)</lark-td>', row, re.DOTALL)
+        # 清理单元格内容：去除多余空白、属性标注、换行
+        cleaned = []
+        for cell in cells:
+            text = cell.strip()
+            # 去除 {align="center"} 等属性
+            text = re.sub(r'\s*\{[^}]*\}\s*', '', text)
+            # 合并多行为单行
+            text = re.sub(r'\s*\n\s*', ' ', text)
+            text = text.strip()
+            cleaned.append(text)
+        md_rows.append(cleaned)
+
+    if not md_rows:
+        return ""
+
+    # 第一行作为表头
+    col_count = max(len(r) for r in md_rows)
+    lines = []
+    header = md_rows[0]
+    # 补齐列数
+    header += [''] * (col_count - len(header))
+    lines.append('| ' + ' | '.join(header) + ' |')
+    lines.append('| ' + ' | '.join(['---'] * col_count) + ' |')
+    for row in md_rows[1:]:
+        row += [''] * (col_count - len(row))
+        lines.append('| ' + ' | '.join(row) + ' |')
+
+    return '\n'.join(lines)
+
+
 def convert_markdown(content, image_mapping):
     """将飞书 Markdown 转换为标准 Markdown"""
 
@@ -142,11 +182,18 @@ def convert_markdown(content, image_mapping):
 
     content = re.sub(r'<image token="([^"]+)"[^/]*/>', replace_image, content)
 
+    # 转换 lark-table 为 Markdown 表格（必须在移除其他标签之前）
+    content = re.sub(r'<lark-table[^>]*>.*?</lark-table>', convert_lark_table, content, flags=re.DOTALL)
+
     # 移除 grid/column 标签
     content = re.sub(r"<grid[^>]*>\s*", "", content)
     content = re.sub(r"</grid>\s*", "", content)
     content = re.sub(r"<column[^>]*>\s*", "", content)
     content = re.sub(r"</column>\s*", "", content)
+
+    # 转换 callout 标签为 blockquote
+    content = re.sub(r'<callout[^>]*>\s*', '> ', content)
+    content = re.sub(r'\s*</callout>', '', content)
 
     # 转换 quote-container 为 blockquote
     content = re.sub(r"<quote-container>\s*", "> ", content)
@@ -155,8 +202,8 @@ def convert_markdown(content, image_mapping):
     # 转换 sheet 标签
     content = re.sub(r'<sheet token="[^"]*"/>', "[表格：请从飞书原文档获取]", content)
 
-    # 转换 text bgcolor 标签
-    content = re.sub(r'<text bgcolor="[^"]*">(.*?)</text>', r"\1", content)
+    # 转换 text bgcolor/color 标签
+    content = re.sub(r'<text[^>]*>(.*?)</text>', r"\1", content)
 
     # 清理多余空行
     content = re.sub(r"\n{4,}", "\n\n\n", content)
