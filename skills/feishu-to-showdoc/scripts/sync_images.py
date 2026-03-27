@@ -67,14 +67,20 @@ def extract_image_tokens(content):
     return list(dict.fromkeys(tokens))
 
 
-def download_from_feishu(token, mcp_config, tmp_dir):
-    """从飞书 MCP 下载图片，返回本地文件路径"""
+def extract_whiteboard_tokens(content):
+    """提取飞书 Markdown 中的画板 token（保持顺序，去重）"""
+    tokens = re.findall(r'<whiteboard token="([^"]+)"', content)
+    return list(dict.fromkeys(tokens))
+
+
+def download_from_feishu(token, mcp_config, tmp_dir, resource_type="media"):
+    """从飞书 MCP 下载图片或画板，返回本地文件路径"""
     payload = json.dumps({
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
             "name": "fetch-file",
-            "arguments": {"resource_token": token, "type": "media"},
+            "arguments": {"resource_token": token, "type": resource_type},
         },
         "id": 1,
     })
@@ -129,42 +135,81 @@ def upload_to_showdoc(file_path, creds):
     return None
 
 
+def _clean_cell(text):
+    """清理单元格内容"""
+    text = text.strip()
+    # 去除 {align="center"} 等属性
+    text = re.sub(r'\s*\{[^}]*\}\s*', '', text)
+    # 合并多行为单行（用空格连接）
+    text = re.sub(r'\s*\n\s*', ' ', text)
+    # 管道符会破坏 Markdown 表格，转义
+    text = text.replace('|', '\\|')
+    return text.strip()
+
+
 def convert_lark_table(match):
-    """将 <lark-table> 转换为 Markdown 表格"""
+    """将 <lark-table> 转换为 Markdown 表格，支持 rowspan/colspan"""
     table_html = match.group(0)
+
+    # 获取列数（优先从 cols 属性读取）
+    cols_match = re.search(r'cols="(\d+)"', table_html)
+    declared_cols = int(cols_match.group(1)) if cols_match else 0
+
     rows = re.findall(r'<lark-tr>(.*?)</lark-tr>', table_html, re.DOTALL)
     if not rows:
         return ""
 
-    md_rows = []
-    for row in rows:
-        cells = re.findall(r'<lark-td>(.*?)</lark-td>', row, re.DOTALL)
-        # 清理单元格内容：去除多余空白、属性标注、换行
-        cleaned = []
-        for cell in cells:
-            text = cell.strip()
-            # 去除 {align="center"} 等属性
-            text = re.sub(r'\s*\{[^}]*\}\s*', '', text)
-            # 合并多行为单行
-            text = re.sub(r'\s*\n\s*', ' ', text)
-            text = text.strip()
-            cleaned.append(text)
-        md_rows.append(cleaned)
+    # 构建二维网格，处理 rowspan 和 colspan
+    grid = []  # grid[row][col] = cell_text
+    for row_idx, row_html in enumerate(rows):
+        # 确保当前行存在
+        while len(grid) <= row_idx:
+            grid.append({})
 
-    if not md_rows:
+        # 提取所有 td（保留属性）
+        tds = re.findall(r'<lark-td([^>]*)>(.*?)</lark-td>', row_html, re.DOTALL)
+
+        col_idx = 0
+        for td_attrs, td_content in tds:
+            # 跳过已被 rowspan 占据的位置
+            while col_idx in grid[row_idx]:
+                col_idx += 1
+
+            text = _clean_cell(td_content)
+
+            # 解析 rowspan/colspan
+            rs_match = re.search(r'rowspan="(\d+)"', td_attrs)
+            cs_match = re.search(r'colspan="(\d+)"', td_attrs)
+            rowspan = int(rs_match.group(1)) if rs_match else 1
+            colspan = int(cs_match.group(1)) if cs_match else 1
+
+            # 填充当前格和合并区域
+            for r in range(rowspan):
+                for c in range(colspan):
+                    target_row = row_idx + r
+                    target_col = col_idx + c
+                    while len(grid) <= target_row:
+                        grid.append({})
+                    if r == 0 and c == 0:
+                        grid[target_row][target_col] = text
+                    else:
+                        grid[target_row][target_col] = ""
+
+            col_idx += colspan
+
+    if not grid:
         return ""
 
-    # 第一行作为表头
-    col_count = max(len(r) for r in md_rows)
+    # 确定总列数
+    col_count = declared_cols or max((max(r.keys()) + 1 if r else 0) for r in grid)
+
+    # 转为列表
     lines = []
-    header = md_rows[0]
-    # 补齐列数
-    header += [''] * (col_count - len(header))
-    lines.append('| ' + ' | '.join(header) + ' |')
-    lines.append('| ' + ' | '.join(['---'] * col_count) + ' |')
-    for row in md_rows[1:]:
-        row += [''] * (col_count - len(row))
-        lines.append('| ' + ' | '.join(row) + ' |')
+    for row_idx, row_dict in enumerate(grid):
+        cells = [row_dict.get(c, "") for c in range(col_count)]
+        lines.append('| ' + ' | '.join(cells) + ' |')
+        if row_idx == 0:
+            lines.append('| ' + ' | '.join(['---'] * col_count) + ' |')
 
     return '\n'.join(lines)
 
@@ -181,6 +226,16 @@ def convert_markdown(content, image_mapping):
         return "[图片：同步失败]"
 
     content = re.sub(r'<image token="([^"]+)"[^/]*/>', replace_image, content)
+
+    # 替换画板标签（复用同一个 image_mapping）
+    def replace_whiteboard(match):
+        token = match.group(1)
+        url = image_mapping.get(token, "")
+        if url:
+            return f"![image]({url})"
+        return "[画板：同步失败]"
+
+    content = re.sub(r'<whiteboard token="([^"]+)"[^/]*/>', replace_whiteboard, content)
 
     # 转换 lark-table 为 Markdown 表格（必须在移除其他标签之前）
     content = re.sub(r'<lark-table[^>]*>.*?</lark-table>', convert_lark_table, content, flags=re.DOTALL)
@@ -205,6 +260,29 @@ def convert_markdown(content, image_mapping):
     # 转换 text bgcolor/color 标签
     content = re.sub(r'<text[^>]*>(.*?)</text>', r"\1", content)
 
+    # 去除代码块语言标识后的 {wrap} 修饰符（飞书特有，ShowDoc 不支持）
+    content = re.sub(r'```(\w+)\s*\{wrap\}', r'```\1', content)
+
+    # 去掉代码块外 4+ 前导空格的段落（飞书缩进会被 Markdown 渲染为代码块）
+    lines = content.split('\n')
+    cleaned = []
+    in_code = False
+    for line in lines:
+        if line.strip().startswith('```'):
+            in_code = not in_code
+            cleaned.append(line)
+            continue
+        if not in_code:
+            stripped = line.lstrip()
+            leading = len(line) - len(stripped)
+            if leading >= 4 and stripped and not stripped.startswith(('#', '|', '-', '*', '>')):
+                line = stripped
+        cleaned.append(line)
+    content = '\n'.join(cleaned)
+
+    # 列表项后紧跟代码围栏时插入空行，否则围栏不被识别
+    content = re.sub(r'^(- .+)\n(```)', r'\1\n\n\2', content, flags=re.MULTILINE)
+
     # 清理多余空行
     content = re.sub(r"\n{4,}", "\n\n\n", content)
 
@@ -226,58 +304,44 @@ def main():
     with open(args.input, "r") as f:
         content = f.read()
 
-    # 提取图片 token
-    tokens = extract_image_tokens(content)
-    print(f"共 {len(tokens)} 张图片需要处理")
-
-    if not tokens:
-        # 无图片，直接转换 Markdown
-        result = convert_markdown(content, {})
-        with open(args.output, "w") as f:
-            f.write(result)
-        print("无图片，仅转换 Markdown 完成")
-        return
+    # 提取图片和画板 token
+    image_tokens = extract_image_tokens(content)
+    whiteboard_tokens = extract_whiteboard_tokens(content)
+    print(f"共 {len(image_tokens)} 张图片、{len(whiteboard_tokens)} 个画板需要处理")
 
     # 创建临时目录
     tmp_dir = "/tmp/feishu_showdoc_images"
     os.makedirs(tmp_dir, exist_ok=True)
 
-    # 逐张处理图片
+    # 统一的下载上传流程
     mapping = {}
     failed = []
 
-    for i, token in enumerate(tokens):
-        print(f"[{i+1}/{len(tokens)}] {token}", end=" ")
-
-        # 下载
+    def process_token(token, index, total, resource_type="media", label="图片"):
+        print(f"[{index}/{total}] {label} {token}", end=" ")
         local_path = None
-        for attempt in range(2):  # 最多重试一次
+        for attempt in range(2):
             try:
-                local_path = download_from_feishu(token, mcp_config, tmp_dir)
+                local_path = download_from_feishu(token, mcp_config, tmp_dir, resource_type)
                 if local_path:
                     break
-            except Exception as e:
+            except Exception:
                 if attempt == 0:
-                    print(f"下载重试...", end=" ")
-
+                    print("下载重试...", end=" ")
         if not local_path:
             print("下载失败")
             failed.append(token)
-            continue
-
+            return
         size = os.path.getsize(local_path)
-
-        # 上传
         url = None
         for attempt in range(2):
             try:
                 url = upload_to_showdoc(local_path, creds)
                 if url:
                     break
-            except Exception as e:
+            except Exception:
                 if attempt == 0:
-                    print(f"上传重试...", end=" ")
-
+                    print("上传重试...", end=" ")
         if url:
             mapping[token] = url
             print(f"OK ({size} bytes)")
@@ -285,7 +349,16 @@ def main():
             print("上传失败")
             failed.append(token)
 
-    # 转换 Markdown
+    total = len(image_tokens) + len(whiteboard_tokens)
+    idx = 0
+    for token in image_tokens:
+        idx += 1
+        process_token(token, idx, total, "media", "图片")
+    for token in whiteboard_tokens:
+        idx += 1
+        process_token(token, idx, total, "whiteboard", "画板")
+
+    # 转换 Markdown（image_mapping 同时包含图片和画板的 URL 映射）
     result = convert_markdown(content, mapping)
     with open(args.output, "w") as f:
         f.write(result)
