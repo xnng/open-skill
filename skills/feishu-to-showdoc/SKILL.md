@@ -1,6 +1,6 @@
 ---
 name: feishu-to-showdoc
-description: '将飞书文档（含图片和表格）同步到 ShowDoc。当用户说「同步到 ShowDoc」「飞书同步 ShowDoc」「把飞书文档写到 ShowDoc」「飞书文档同步」「同步操作手册到 showdoc」或提供飞书链接并要求同步到文档平台时触发。'
+description: "将飞书文档及其图片、画板、嵌入表格同步到 ShowDoc。"
 ---
 
 # 飞书文档同步到 ShowDoc
@@ -26,65 +26,11 @@ description: '将飞书文档（含图片和表格）同步到 ShowDoc。当用�
 }
 ```
 
-### 首次使用交互流程
+### 认证与目标
 
-执行同步前，先检查本 skill 目录下是否存在 `credentials.json`。
+先检查已有 `credentials.json`、用户指令和 `sync-tasks/` 配置，只询问缺失的认证字段或无法确定的目标目录，已有信息不重复确认。认证写入上述结构，临时目录选择仅用于当前任务。
 
-**如果文件不存在或缺少字段，必须在同步开始前完成以下全部询问。使用 `AskUserQuestion` 工具逐项向用户收集，收集完毕后写入 `credentials.json`，然后才能执行同步。禁止跳过任何一项、禁止使用默认值、禁止猜测。**
-
-#### 第 1 步：询问 ShowDoc 站点地址
-
-调用 `AskUserQuestion`，内容如下：
-
-> 请提供你的 ShowDoc 站点地址（例如 `https://docs.example.com`）。
-
-将用户回复存入 `showdoc_base_url`。
-
-#### 第 2 步：询问 ShowDoc 用户 Token
-
-调用 `AskUserQuestion`，内容如下：
-
-> 同步过程中需要上传图片到 ShowDoc，这需要一个 user_token 用于认证。请按以下步骤获取：
->
-> 1. 用浏览器打开你的 ShowDoc 站点并登录
-> 2. 按 F12 打开浏览器开发者工具
-> 3. 切换到 Console（控制台）标签页
-> 4. 输入以下代码并回车：
->    ```
->    JSON.parse(localStorage.getItem('userinfo')).user_token
->    ```
-> 5. 复制输出的字符串发给我
-
-将用户回复存入 `showdoc_user_token`。
-
-#### 第 3 步：询问 ShowDoc 项目的 API Key 和 API Token
-
-调用 `AskUserQuestion`，内容如下：
-
-> 请提供目标 ShowDoc 项目（知识库）的 API Key 和 API Token。获取方式：
->
-> 1. 进入你要同步到的 ShowDoc 项目
-> 2. 点击页面右上角的「...」菜单
-> 3. 点击「开放 API」
-> 4. 复制页面中显示的 **API Key** 和 **API Token**
->
-> 请把这两个值发给我，同时告诉我一个项目名称（例如「操作手册」），用来标识这个项目。
-
-将用户回复存入 `projects.<项目名称>.api_key` 和 `projects.<项目名称>.api_token`。
-
-#### 第 4 步：询问同步目标目录
-
-调用 `AskUserQuestion`，内容如下：
-
-> 请问文档要存放在 ShowDoc 的哪个目录下？支持多级目录，用 `/` 分隔（例如 `智慧能源SAAS系统/运维端`）。
-
-该值作为后续推送到 ShowDoc 时的 `cat_name` 参数。
-
-#### 完成
-
-将第 1-3 步收集到的信息写入本 skill 目录下的 `credentials.json`，格式见上方结构定义。第 4 步的目录信息仅用于本次同步，不写入文件。
-
-**后续使用时**：如果 `credentials.json` 已存在且字段完整，跳过第 1-3 步，只执行第 4 步询问目标目录。如果用户要同步到一个新的 ShowDoc 项目（credentials.json 中没有该项目），则执行第 3-4 步。
+ShowDoc 的 user_token 可从已登录站点的浏览器 localStorage 中 `userinfo.user_token` 获取；项目 API Key/Token 位于项目的「开放 API」。不具备所需权限时停止同步。
 
 ## 预定义同步任务
 
@@ -119,22 +65,19 @@ description: '将飞书文档（含图片和表格）同步到 ShowDoc。当用�
 
 ### 第一步：获取飞书文档
 
-使用飞书 MCP 工具获取文档内容。工具名取决于用户配置的 MCP 服务器名称，通常为 `fetch-doc`，参数为飞书文档 URL 或 ID。
-
-如果找不到飞书 MCP 工具，提示用户检查 `~/.claude.json` 中是否配置了飞书 MCP 服务器。
+使用 `lark-cli docs +fetch --doc "飞书文档 URL 或 ID"`（详见 lark-doc skill）获取文档内容。
 
 ### 第二步：获取嵌入表格
 
 飞书文档中嵌入的电子表格以 `<sheet token="xxx"/>` 标签表示，token 格式为 `{spreadsheet_token}_{sheet_id}`。
 
-如果飞书 MCP 提供了 `read-sheet` 工具，用它获取表格数据：
+同步时必须识别并展开这类嵌入 Sheet，禁止保留 `<sheet token="..."/>`、`本地 Markdown 未展开` 或仅保留 token 的占位。使用 `lark-cli sheets +read`（详见 lark-sheets skill）获取表格数据：
 
-```
-工具: read-sheet
-参数: spreadsheet_token = <下划线前的部分>, range = <下划线后的部分>
+```bash
+lark-cli sheets +read --spreadsheet-token <最后一个下划线前的部分> --sheet-id <最后一个下划线后的部分>
 ```
 
-返回的 `values` 是二维数组，第一行为表头。转为 Markdown 表格：
+返回的 `values` 是二维数组，第一行为表头。单元格可能是普通字符串、数字、空值，也可能是富文本 segment 数组；转换前必须先拍平成文本。然后转为 Markdown 表格：
 
 ```markdown
 | 表头1 | 表头2 |
@@ -142,7 +85,7 @@ description: '将飞书文档（含图片和表格）同步到 ShowDoc。当用�
 | 数据1 | 数据2 |
 ```
 
-如果没有 `read-sheet` 工具，保留占位符 `[表格：请从飞书原文档获取]`。
+如果 `sheets +read` 失败，必须让同步校验失败并停止推送，不允许静默推送缺表内容。
 
 ### 第三步：转换 Markdown
 
@@ -175,13 +118,13 @@ python3 <本skill目录>/scripts/sync_images.py \
 
 脚本会：
 1. 从 Markdown 中提取所有 `<image token="xxx">` 的 token
-2. 通过飞书 MCP HTTP 接口下载每张图片（base64）
+2. 通过 `lark-cli docs +media-download` 下载每张图片到本地
 3. 上传到 ShowDoc（通过 `uploadImg` API）
 4. 将 `<image>` 标签替换为 `![image](ShowDoc URL)`
-5. 同时完成其他 Markdown 标签的转换
-6. 输出最终的标准 Markdown 文件
-
-脚本从 `~/.claude.json` 中自动读取飞书 MCP 服务器的 URL 和 API Key。如果找不到，提示用户检查 MCP 配置。
+5. 从 `<sheet token="spreadsheetToken_sheetId"/>` 读取嵌入 Sheet，并展开为标准 Markdown 表格
+6. 同时完成其他 Markdown 标签的转换
+7. 输出最终的标准 Markdown 文件
+8. 校验 `<lark-table>` 和 `<sheet>` 对应的表格数量一致，且输出中没有未展开 Sheet 或同步失败占位；校验失败时脚本以非 0 状态退出，禁止继续推送 ShowDoc
 
 ### 第五步：推送到 ShowDoc
 
@@ -216,3 +159,7 @@ curl -s -X POST '<showdoc_base_url>/server/index.php?s=/api/open/updatePage' \
   - `OpenController.class.php`：`I("page_title", '', '')` 和 `I("page_content", '', '')`，第三个参数为空字符串以禁用默认过滤
   - `PageModel.class.php`：`page_title` 不再经过 `_htmlspecialchars`，直接存储原始值
   - 修改后需部署到服务器：`scp` 文件到 `/data/showdoc/server/Application/` 对应路径，然后 `docker restart showdoc`
+
+## 开源仓库同步
+
+本 skill 的公开镜像位于 `/Users/xnng/code/utils/open-skill/skills/feishu-to-showdoc/`。修改时核对并同步对应内容，保留镜像中的既有改动；不复制凭据或内部任务配置。提交和推送按当前任务的明确授权执行，维护本地 skill 不自动授权发布。
