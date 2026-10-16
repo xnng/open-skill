@@ -9,11 +9,9 @@
 npx skills add xnng/open-skill -g -a claude-code
 
 # 安装指定 skill
-npx skills add xnng/open-skill -g -a claude-code --skill feishu-to-showdoc
+npx skills add xnng/open-skill -g -a claude-code --skill <skill 名>
 ```
 
 ## Skills 列表
 
-| Skill | 说明 |
-|-------|------|
-| [feishu-to-showdoc](skills/feishu-to-showdoc) | 将飞书文档（含图片和表格）同步到 ShowDoc |
+暂无。
